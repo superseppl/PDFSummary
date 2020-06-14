@@ -13,8 +13,6 @@ input1 = PdfFileReader(open(src, "rb"))
 output = PdfFileWriter()
 nPages = input1.getNumPages()
 
-first = True;
-
 for i in range(nPages): 
     page = input1.getPage(i)
     #print page
@@ -43,8 +41,6 @@ for i in range(nPages):
                 tmp_page.cropBox.lowerRight = (page.mediaBox.getUpperRight_x(), annot.getObject()['/Rect'][3])
                 output.addPage(tmp_page)
 
-            
-                
 
 outputStream = file("test.pdf", "wb")
 output.write(outputStream)
