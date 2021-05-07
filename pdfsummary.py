@@ -1,107 +1,160 @@
-import sys
+import sys, os
 import io
-
-from PyPDF2 import PdfFileReader, PdfFileWriter
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
 import json
 
-def extract_information(path):
-    pdf = PdfFileReader(open(path, "rb"))
-    information = pdf.getDocumentInfo()
+from PyPDF2 import PdfFileReader, PdfFileWriter
 
-    txt = """
-    Information about {path}: 
+from reportlab.platypus.flowables import Flowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import A4
 
-    Author: {information.author}
-    Creator: {information.creator}
-    Producer: {information.producer}
-    Subject: {information.subject}
-    Title: {information.title}
-    Number of pages: {pdf.getNumPages()}
-    """
+class HandAnnotation(Flowable, object):
+    def __init__(self, start):
+        super(Flowable, self).__init__()
+        self.width=A4[1]
+        self.height=70
 
-    print(txt)
-    return information
+        self.start = start
+        self.vertices = []
+        #self._showBoundary = 1
 
-def extract_comments(path):
-    inPdf = PdfFileReader(open(path, "rb"))
-    outPdf = PdfFileWriter()
-    nPages = inPdf.getNumPages()
+    def __repr__(self):
+        return ("Annotation start: {}".format(self.start))
 
-    packet = io.BytesIO()
-    can = canvas.Canvas(packet, pagesize=A4)
-    xPos, yPos = A4
+    def __add__(self, vertices):
+        self.vertices.append(vertices)
 
-    yOffset = 50.0
-    yWritingOffset = 0.0
-    xWritingOffset = 0.0
+    def update_height(self):
+        yMax = max(max([o[1::2] for o in self.vertices]))
+        yMin = min(min([o[1::2] for o in self.vertices]))
+        self.height = (yMax - yMin) + 10
+        self.start[1] = yMin
 
-    for i in range(nPages): 
-        page = inPdf.getPage(i)
+    def draw(self):
+        for v in self.vertices:
+            p_x = [o - self.start[0] for o in v[::2]]
+            p_y = [o - self.start[1] for o in v[1::2]]
 
-        if '/Annots' in page:
-            for annot in page['/Annots']:
-                object = annot.getObject()
+            p = self.canv.beginPath()
+            p.moveTo(p_x[0],p_y[0])
+            for x,y in zip(p_x[1:],p_y[1:]):
+                p.lineTo(x,y)
+            self.canv.drawPath(p)
 
-                if (yOffset > yPos - 20):        
-                    can.showPage()
-                    yOffset = 50
+class PDFCut(Flowable, object):
+    def __init__(self, img):
+        super(Flowable, self).__init__()
+        self.width, self.height = img.size
+        self.img = img
+        #self._showBoundary = 1
 
-                # Writings
-                if object['/Subtype'] == '/PolyLine':
-                    drawing = [float(o) for o in object['/Vertices']]
+    def __repr__(self):
+        return ("Annotation start: {}".format(self.start))
 
-                    if abs(yWritingOffset - drawing[1]) > 60:
-                        yOffset += 60
-                        xWritingOffset = drawing[0]
-                        yWritingOffset = drawing[1]
-                        
-                    p_x = [o - xWritingOffset + 20 for o in drawing[::2]]
-                    p_y = [o + (yPos - yOffset) - yWritingOffset for o in drawing[1::2]]
+    def draw(self):
+        self.canv.drawInlineImage(self.img, 0,0)
 
-                    p = can.beginPath()
-                    p.moveTo(p_x[0],p_y[0])
-                    for x,y in zip(p_x[1:],p_y[1:]):
-                        p.lineTo(x,y)
+class PDFSummary():
+    def __init__(self):
+        pass
 
-                    can.drawPath(p)
+    def check_folder(self, path):
+        files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path,f))]
+        files = filter(lambda f: f.endswith(('.pdf','.PDF')), files)
 
-                # Highlightet text
-                if annot.getObject()['/Subtype'] == '/Highlight':
-                    if "/onyxtag" in object:
+        story = []
+        for f in files:
+            print("Check file {}".format(f))
+            self.extract_informationc(f, path)
+            story += self.check_file(f, path)
+
+        outPdf = SimpleDocTemplate("summary.pdf",pagesize = A4)
+        outPdf.build(story)
+
+    def extract_informationc(self,file, path=""):
+        inPdf = PdfFileReader(open(os.path.join(path,file), "rb"))
+        information = inPdf.getDocumentInfo()
+
+        txt = f"""
+        Information about {file}:
+
+        Author: {information.author}
+        Creator: {information.creator}
+        Producer: {information.producer}
+        Subject: {information.subject}
+        Title: {information.title}
+        Number of pages: {inPdf.getNumPages()}
+        """
+
+        print(txt)
+        return information
+
+    def check_file(self,file, path=""):
+        inPdf = PdfFileReader(open(os.path.join(path,file), "rb"))
+        nPages = inPdf.getNumPages()
+
+        styles = getSampleStyleSheet()
+        story = []
+
+        handAnnotation = None
+
+        for i in range(nPages):
+            page = inPdf.getPage(i)
+
+            if '/Annots' in page:
+                for annot in page['/Annots']:
+                    object = annot.getObject()
+
+                    # Highlightet text
+                    if annot.getObject()['/Subtype'] == '/Highlight':
+                        if object['/Contents'] != '':
+                            story.append(Paragraph(object['/Contents'].encode('ascii', 'ignore'), styles['Normal']))
+
+                        if "/onyxtag" in object:
+                            tag = json.loads(object["/onyxtag"])
+                            attr = json.loads(tag["extra_attr"])
+                            story.append(Paragraph(attr["quote"].encode('ascii', 'ignore'), styles['Normal']))
+
+                    # Writings
+                    if object['/Subtype'] == '/PolyLine':
+                        vertices = [float(o) for o in object['/Vertices']]
+
+                        if handAnnotation is None:
+                            handAnnotation = HandAnnotation(vertices[:2])
+                            handAnnotation + vertices
+                        elif abs(handAnnotation.start[1] - vertices[1]) > 50:
+                            handAnnotation.update_height()
+                            story.append(handAnnotation)
+
+                            handAnnotation = HandAnnotation(vertices[:2])
+                            handAnnotation + vertices
+                        else:
+                            handAnnotation + vertices
+
+                    # Cut out each square comment
+                    if object['/Subtype'] == '/Polygon':
+                        pdfWriter = PdfFileWriter()
+                        pdfWriter.addPage(page)
+
+                        pdfBytes = io.BytesIO()
+                        pdfWriter.write(pdfBytes)
+                        pdfBytes.seek(0)
+
                         tag = json.loads(object["/onyxtag"])
                         attr = json.loads(tag["extra_attr"])
-                        can.drawString(10, yPos - yOffset, attr["quote"].encode('ascii', 'ignore'))
-                        yOffset += 50
+                        p1 = attr["points"][0]
+                        p2 = attr["points"][1]
 
-                # Cut out each square comment
-                # if annot.getObject()['/Subtype'] == '/Square':
-                #     print(object)
-                    # print(annot.getObject()['/Rect'])
-                    # tmp_page.cropBox.upperLeft = annot.getObject()['/Rect'][0:2]
-                    # tmp_page.cropBox.lowerRight = annot.getObject()['/Rect'][2:4]
-                    # output.addPage(tmp_page)
+                        from pdf2image import convert_from_bytes
+                        size=(page.mediaBox.getWidth(), page.mediaBox.getHeight())
+                        img = convert_from_bytes(pdfBytes.getvalue(), size=size)[0]
+                        img = img.crop((p1["x"]+1,p1["y"]+1,p2["x"]-1,p2["y"]-1))
 
-                # Text
+                        if (img.size > (0.0,0.0)):
+                            story.append(PDFCut(img))
 
-                    # print(annot.getObject()['/Rect'])
-                    # tmp_page.cropBox.upperLeft = annot.getObject()['/Rect'][0:2]
-                    # tmp_page.cropBox.lowerRight = annot.getObject()['/Rect'][2:4]
-                    # output.addPage(tmp_page)
-
-    #             # Cut out whole page for each vertical line 
-    #             if annot.getObject()['/Subtype'] == '/Line':  
-    #                 print(annot.getObject()['/Rect'])
-    #                 tmp_page.cropBox.upperLeft = (0, annot.getObject()['/Rect'][1])
-    #                 tmp_page.cropBox.lowerRight = (page.mediaBox.getUpperRight_x(), annot.getObject()['/Rect'][3])
-    #                 output.addPage(tmp_page)
-
-    can.save()
-    packet.seek(0)
-
-    with open("test.pdf",'wb') as fp:
-        fp.write(packet.getvalue())
+        return story
 
 if __name__ == '__main__':
     try :
@@ -109,38 +162,5 @@ if __name__ == '__main__':
     except :
         path = r'/path/to/my/file.pdf'
 
-    extract_comments(path)
-
-    
-
-    # comment = [282.94, 642.44, 282.94, 642.44, 282.94, 642.44, 282.94, 642.44, 282.94, 642.44, 282.94, 642.24, 282.94, 641.92, 282.94, 641.51, 282.94, 640.98, 282.94, 640.25, 282.94, 639.42, 282.94, 638.38, 282.94, 637.12, 282.94, 635.66, 283.04, 634.2, 283.13, 632.74, 283.23, 631.28, 283.42, 629.93, 283.61, 628.67, 283.9, 627.53, 284.09, 626.48, 284.28, 625.65, 284.57, 624.81, 284.76, 624.19, 284.95, 623.67, 285.24, 623.25]
-    
-    # for i in range(0,len(comment),4):
-    #     if comment[i-4:i] != []:
-    #         can.line(*comment[i-4:i])
-
-    # comment = [ int(x) for x in comment ]
-
-    # output = PdfFileWriter()
-    # new_pdf = PdfFileReader(packet)
-    # output.addPage(new_pdf)
-    # output.write(open("test.pdf", "wb"))
-
-    # x, y = 0,0
-	# while y + can.height < 290:
-	# 	while x + can.width < 200:
-	# 		can.drawOn(can, x, y)
-	# 		x = x + (1 + can.width)
-	# 	x = 10
-	# 	y = y + (1 + barcode.height)*mm 
-    
-    # can.showPage() 
-    # can.save()
-
-
-
-    
-
-#/Rect defines the bounding box of the comment on the page/spread, in points (1/72 of an inch) relative to the lower-left corner of the page, increasing values going right and up.
-# y |_ x
-# For different pdf annotators: if '/QuadPoints' in annot.getObject(): # if '/L' in annot.getObject():
+    pdfSummary = PDFSummary()
+    pdfSummary.check_folder(path)
